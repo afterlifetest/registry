@@ -1,0 +1,91 @@
+# Copies the Afterlife Test registry once a day, checks it, and keeps it here
+# and at the Internet Archive, so the test outlives the website.
+name: Mirror the registry
+
+on:
+  schedule:
+    - cron: "17 3 * * *"     # every day at 03:17 UTC
+  workflow_dispatch: {}      # "Run workflow" button for a manual copy
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+env:
+  SOURCE_URL: https://afterlifetest.com/api.php?action=export
+  IA_ITEM: afterlifetest-registry
+  # Internet Archive keys (archive.org/account/s3.php), saved as repository secrets.
+  # Without them, the copy is kept on GitHub only.
+  IA_ACCESS: ${{ secrets.IA_ACCESS }}
+  IA_SECRET: ${{ secrets.IA_SECRET }}
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the registry
+        run: |
+          curl --fail --silent --show-error --location --retry 3 --max-time 120 \
+            -H "User-Agent: afterlifetest-mirror (+https://github.com/${GITHUB_REPOSITORY})" \
+            "$SOURCE_URL" -o new.json
+          python3 check.py chain new.json
+          # names, death sources and opening accounts never leave the live site
+          python3 check.py strip new.json
+
+      - name: Check both hash chains, and that nothing old was changed or removed
+        run: |
+          if [ -f registry.json ]; then
+            python3 check.py append registry.json new.json
+          else
+            python3 check.py chain new.json
+          fi
+
+      - name: Save the copy
+        id: save
+        run: |
+          mv new.json registry.json
+          mkdir -p snapshots
+          # One snapshot per month is kept for ever. It also keeps this repository
+          # active, so GitHub never pauses the daily schedule.
+          month=$(date -u +%Y-%m)
+          [ -f "snapshots/$month.json" ] || cp registry.json "snapshots/$month.json"
+          sha256sum registry.json snapshots/*.json > SHA256SUMS
+          git config user.name  "registry-mirror"
+          git config user.email "registry-mirror@users.noreply.github.com"
+          git add registry.json snapshots SHA256SUMS
+          if git diff --cached --quiet; then
+            echo "changed=no" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "Registry copy $(date -u +%Y-%m-%d)"
+            git push
+            echo "changed=yes" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload to the Internet Archive
+        if: steps.save.outputs.changed == 'yes' && env.IA_ACCESS != ''
+        run: |
+          month=$(date -u +%Y-%m)
+          for f in registry.json "snapshots/$month.json" verify.html check.py README.md; do
+            name=$(echo "$f" | tr '/' '-')
+            curl --fail --silent --show-error --retry 3 --max-time 300 \
+              --upload-file "$f" "https://s3.us.archive.org/${IA_ITEM}/${name}" \
+              -H "Authorization: LOW ${IA_ACCESS}:${IA_SECRET}" \
+              -H "x-archive-auto-make-bucket:1" \
+              -H "x-archive-keep-old-version:1" \
+              -H "x-archive-queue-derive:0" \
+              -H "x-archive-meta-mediatype:data" \
+              -H "x-archive-meta-collection:opensource" \
+              -H "x-archive-meta-title:Afterlife Test registry (independent copy)" \
+              -H "x-archive-meta-creator:Afterlife Test" \
+              -H "x-archive-meta-description:Daily copy of the public Afterlife Test registry, with an offline verifier (verify.html) and a checker (check.py). Lets anyone check a sealed phrase even if afterlifetest.com no longer exists."
+          done
+
+      - name: Ask the Wayback Machine to save the live export too
+        if: steps.save.outputs.changed == 'yes'
+        continue-on-error: true
+        run: curl --silent --max-time 120 -o /dev/null "https://web.archive.org/save/${SOURCE_URL}"
