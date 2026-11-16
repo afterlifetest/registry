@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Afterlife Test – check a phrase without the website</title>
+<meta name="description" content="An independent copy of the Afterlife Test registry. Check a phrase against any seal on your own device, even if afterlifetest.com no longer exists.">
+<style>
+  :root { --cyan:#173A66; --deep:#0E2747; --ink:#0A1C35; --ghost:#EEF3F8; --mist:#A9C0DA; --line:rgba(238,243,248,.18); --wax:#B3322B; --wax-text:#F6B3AB; --ok:#9FE0B8; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--cyan); color:var(--ghost); font:18px/1.6 Georgia, "Times New Roman", serif; }
+  main { max-width: 38rem; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-weight: normal; font-size: 2rem; line-height: 1.2; margin: 0 0 12px; }
+  h2 { font-weight: normal; font-size: 1.3rem; margin: 32px 0 8px; }
+  p { margin: 0 0 12px; }
+  .muted { color: var(--mist); }
+  label { display:block; margin: 16px 0 6px; }
+  input, select, textarea { width:100%; font: inherit; color: var(--ghost); background: var(--ink); border:1px solid var(--line); border-radius: 6px; padding: 10px 12px; }
+  textarea { min-height: 5em; }
+  button { font: inherit; margin-top: 16px; padding: 12px 20px; min-height: 48px; border: 0; border-radius: 6px; background: var(--wax); color: #fff; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  :focus-visible { outline: 3px solid var(--ghost); outline-offset: 2px; }
+  .result { margin-top: 20px; padding: 16px; border-radius: 6px; background: var(--deep); border: 1px solid var(--line); }
+  .result.ok { border-color: var(--ok); }
+  .result.no { border-color: var(--wax-text); }
+  code { font-family: "Courier New", monospace; font-size: .9em; word-break: break-all; }
+  a { color: var(--ghost); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Check a phrase without the website</h1>
+  <p>This page is part of an independent copy of the Afterlife Test registry, kept on GitHub and at the Internet Archive. It works even if afterlifetest.com no longer exists. Everything is computed on your device. Nothing you type is sent anywhere.</p>
+  <p class="muted">If you know the phrase, type it here. It costs nothing.</p>
+
+  <section id="load-box">
+    <h2>1. The registry</h2>
+    <p id="load-status" class="muted" role="status">Loading the copy saved next to this page…</p>
+    <label for="file">Or open a saved copy (registry.json)</label>
+    <input id="file" type="file" accept="application/json,.json">
+  </section>
+
+  <section id="check-box" hidden>
+    <h2>2. The seal and the phrase</h2>
+    <label for="seal">Seal number</label>
+    <input id="seal" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="As written on the keepsake or the certificate">
+    <p id="seal-info" class="muted" aria-live="polite"></p>
+    <label for="phrase">Phrase received</label>
+    <textarea id="phrase" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Exactly as it was passed on"></textarea>
+    <button id="go" type="button" disabled>Check the phrase</button>
+    <div id="result" class="result" role="status" aria-live="polite" hidden></div>
+  </section>
+
+  <section>
+    <h2>How this works</h2>
+    <p class="muted">Each seal keeps a random salt and a fingerprint of the phrase (PBKDF2-SHA256, usually 600,000 rounds). This page computes the fingerprint of what you type with the same salt and compares the two. Letter case and extra spaces do not matter. The page also recomputes both hash chains, so you can see whether the copy has been altered.</p>
+    <p class="muted">A match found here is not recorded anywhere. If the website still exists, enter the phrase on the seal's page as well, so the opening is logged publicly with its date.</p>
+  </section>
+</main>
+<script>
+'use strict';
+let registry = null;
+const $ = (id) => document.getElementById(id);
+const hex = (b) => Array.from(new Uint8Array(b), (x) => x.toString(16).padStart(2, '0')).join('');
+const unhex = (h) => new Uint8Array(h.match(/../g).map((x) => parseInt(x, 16)));
+const sha256 = async (t) => hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t)));
+const norm = (t) => String(t || '').normalize('NFC').toLowerCase().trim().split(/\s+/).filter(Boolean).join(' ');
+
+async function checkChains(d) {
+  let prev = '0'.repeat(64), bad = 0;
+  for (const s of d.seals || []) {
+    const c = await sha256([prev, s.id, s.name_hash, s.salt, s.hash, String(s.iterations), s.created_at_raw].join('|'));
+    if (s.prev_chain !== prev || s.chain !== c) bad++;
+    prev = s.chain;
+  }
+  prev = '0'.repeat(64);
+  for (const c of d.changes || []) {
+    const x = await sha256([prev, String(c.id), c.seal_id, c.action, c.reason, c.created_at_raw].join('|'));
+    if (c.prev_chain !== prev || c.chain !== x) bad++;
+    prev = c.chain;
+  }
+  return bad;
+}
+
+async function use(d, source) {
+  if (!d || !String(d.format || '').startsWith('afterlifetest-registry')) throw new Error('This file is not an Afterlife Test registry.');
+  registry = d;
+  const bad = await checkChains(d);
+  const when = d.exported_at ? new Date(d.exported_at).toISOString().slice(0, 10) : 'unknown date';
+  $('load-status').textContent = `${source}: ${(d.seals || []).length} seals, copied on ${when}. ` +
+    (bad === 0 ? 'Both hash chains check out: the copy has not been altered.' : `Warning: ${bad} ${bad === 1 ? "entry does" : "entries do"} not match the chain. This copy may have been altered.`);
+  $('check-box').hidden = false;
+  update();
+}
+
+function findSeal() {
+  const id = $('seal').value.trim().toLowerCase();
+  return registry && id ? (registry.seals || []).find((s) => s.id.toLowerCase() === id) : null;
+}
+
+function update() {
+  const s = findSeal();
+  const info = $('seal-info');
+  if (!$('seal').value.trim()) info.textContent = '';
+  else if (!s) info.textContent = 'No seal with this number in this copy.';
+  else info.textContent = `Seal ${s.id}, sealed ${String(s.created_at).slice(0, 10)}` +
+    (s.revealed ? '. The creator marked this phrase as revealed, so a match proves nothing.' : '') +
+    (s.withdrawn ? '. This seal was withdrawn.' : '');
+  $('go').disabled = !s || !norm($('phrase').value);
+}
+
+$('seal').addEventListener('input', update);
+$('phrase').addEventListener('input', update);
+$('go').addEventListener('click', async () => {
+  const s = findSeal();
+  const out = $('result');
+  $('go').disabled = true;
+  out.hidden = false; out.className = 'result'; out.textContent = 'Computing the fingerprint. This takes a few seconds on purpose…';
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(norm($('phrase').value)), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: unhex(s.salt), iterations: s.iterations }, key, 256);
+  const match = hex(bits) === s.hash;
+  out.className = 'result ' + (match ? 'ok' : 'no');
+  out.textContent = match
+    ? 'The phrase matches this seal. Write down when, how and from whom it reached you. If afterlifetest.com still exists, enter it there too, so the opening is recorded publicly.'
+    : 'The phrase does not match this seal.';
+  update();
+});
+$('file').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  try { await use(JSON.parse(await f.text()), f.name); }
+  catch (err) { $('load-status').textContent = err.message; }
+});
+
+if (!window.isSecureContext && location.protocol !== 'file:') {
+  $('load-status').textContent = 'Open this page over https (or as a file on your computer); browsers block the cryptography otherwise.';
+} else {
+  fetch('registry.json', { cache: 'no-store' })
+    .then((r) => { if (!r.ok) throw new Error(); return r.json(); })
+    .then((d) => use(d, 'Copy saved next to this page'))
+    .catch(() => { $('load-status').textContent = 'No copy found next to this page. Open a saved registry.json below.'; });
+}
+const q = new URLSearchParams(location.search).get('seal');
+if (q) $('seal').value = q;
+</script>
+</body>
+</html>
